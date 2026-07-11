@@ -54,7 +54,9 @@ log = logging.getLogger(__name__)
 # CONFIG
 # ---------------------------------------------------------------------------
 
-#test
+# Data directories
+
+data_output = "~/Desktop/Python_data/quant_projects/director_trading/data_output"
 
 # SEC REQUIRES a real contact email in the User-Agent or it will block you.
 SEC_USER_AGENT = "yoyoman021@gmail.com"
@@ -285,7 +287,7 @@ def main():
         ]
     ]
 
-    out_path = "ceo_purchases.csv"
+    out_path = f"{data_output}/ceo_purchases.csv"
     df.to_csv(out_path, index=False)
     log.info(f"Saved {len(df)} rows to {out_path}")
 
