@@ -65,7 +65,7 @@ SEC_HEADERS = {"User-Agent": SEC_USER_AGENT}
 REQUEST_DELAY_SEC = 0.15   # ~6-7 req/sec, under SEC's 10 req/sec limit
 
 # --- Tune these before running at scale ---
-NASDAQ_MAX_COMPANIES = 5      # set higher / None to scan all NASDAQ (slow!)
+NASDAQ_MAX_COMPANIES = 2      # set higher / None to scan all NASDAQ (slow!)
 NASDAQ_FILINGS_PER_COMPANY = 10
 # ---------------------------------------------------------------------------
 # NASDAQ / SEC FORM 4
@@ -124,7 +124,7 @@ def parse_form4_for_ceo_purchases(cik, accession, doc):
     for candidate in candidates:
         try:
             r = requests.get(base_url + candidate, headers=SEC_HEADERS, timeout=30)
-            if r.status_code == 200 and b"<ownershipDocument" in r.content:
+            if r.status_code == 200 and b"<ownershipDocument>" in r.content:
                 root = ET.fromstring(r.content)
                 break
         except (requests.RequestException, ET.ParseError):
