@@ -40,7 +40,7 @@ def net_value_series(pred_next: np.ndarray, true_close: np.ndarray) -> np.ndarra
     """
     y_t = true_close[:-1]
     y_tp1 = true_close[1:]
-    y_hat_tp1 = pred_next[:-1]
+    y_hat_tp1 = pred_next
 
     signs = np.sign(y_hat_tp1 - y_t)
     returns = np.log(y_tp1 / y_t) * signs  # R_{t+1}, Eq. (2)
