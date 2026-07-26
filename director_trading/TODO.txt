@@ -1,6 +1,4 @@
 TODO:
-- Test prefilling historicals script
-- Run for full duration (from 2023 Q1 onwards)
 - Run test for daily update
 - Configure so that it updates automatically without me having to run it (but it prints out a log - send me via email?)
 

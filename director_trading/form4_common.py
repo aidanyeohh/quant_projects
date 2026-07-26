@@ -45,12 +45,12 @@ log = logging.getLogger(__name__)
 # data_output = "~/Desktop/Python_data/quant_projects/director_trading/data_output"
 data_output = "C:/Users/atsye/Desktop/Python_data/quant_projects/director_trading/data_output"
 
-SEC_USER_AGENT = "Your Name your.email@example.com"
+SEC_USER_AGENT = "yoyoman021.@gmail.com"
 SEC_HEADERS = {"User-Agent": SEC_USER_AGENT}
 
 REQUEST_DELAY_SEC = 0.15  # ~6-7 req/sec, under SEC's 10 req/sec limit
 
-CSV_PATH = Path(f"{data_output}/ceo_purchases.csv")
+DATA_PATH = Path(f"{data_output}/ceo_purchases.pkl")
 STATE_PATH = Path(f"{data_output}/state.json")
 NASDAQ_CACHE_PATH = Path(f"{data_output}/nasdaq_ciks_cache.json")
 NASDAQ_CACHE_MAX_AGE_DAYS = 7  # NASDAQ's ticker/CIK list barely changes day to day
@@ -74,10 +74,6 @@ FINAL_COLUMNS = [
     "cluster_buy_count", "is_cluster_buy",
 ]
 
-CSV_DATA_TYPES = {  
-    "date" : "datetime64"
-}
- 
 # ---------------------------------------------------------------------------
 # NASDAQ TICKER / CIK UNIVERSE (cached -- this list changes rarely)
 # ---------------------------------------------------------------------------
@@ -491,12 +487,12 @@ def add_cluster_signal(df, window_days=CLUSTER_WINDOW_DAYS):
  
  
 # ---------------------------------------------------------------------------
-# CSV MERGE (append-safe, deduplicated)
+# Pickle MERGE (append-safe, deduplicated)
 # ---------------------------------------------------------------------------
  
-def merge_and_save(new_rows, csv_path=CSV_PATH, compute_clusters=True):
+def merge_and_save(new_rows, data_path=DATA_PATH, compute_clusters=True):
     """Take a list of raw transaction dicts, enrich with market cap, merge
-    with any existing CSV (deduplicated), and save. Returns the combined
+    with any existing Pickle (deduplicated), and save. Returns the combined
     DataFrame.
  
     `compute_clusters=False` skips the (whole-dataset) cluster-buy pass --
@@ -505,8 +501,8 @@ def merge_and_save(new_rows, csv_path=CSV_PATH, compute_clusters=True):
     250-filing checkpoint."""
     if not new_rows:
         log.info("No new transactions to save.")
-        if csv_path.exists():
-            return pd.read_csv(csv_path, parse_dates=["date", "date_filed"])
+        if data_path.exists():
+            return pd.read_pickle(data_path)
         return pd.DataFrame()
  
     new_df = pd.DataFrame(new_rows)
@@ -518,8 +514,8 @@ def merge_and_save(new_rows, csv_path=CSV_PATH, compute_clusters=True):
     new_df = add_market_cap(new_df)
     new_df = new_df.reindex(columns=FINAL_COLUMNS)
  
-    if csv_path.exists():
-        existing_df = pd.read_csv(csv_path, parse_dates=["date","date_filed"], low_memory=False)
+    if data_path.exists():
+        existing_df = pd.read_picle(data_path)
         existing_df['date'] = pd.to_datetime(existing_df['date'], errors='coerce')
         combined = pd.concat([existing_df, new_df], ignore_index=True)
         combined = combined.drop_duplicates(
@@ -533,6 +529,6 @@ def merge_and_save(new_rows, csv_path=CSV_PATH, compute_clusters=True):
         combined = add_cluster_signal(combined)
  
     combined = combined.sort_values("date_filed", ascending=False).reset_index(drop=True)
-    combined.to_csv(csv_path, index=False)
-    log.info(f"Saved {len(combined)} total rows ({len(new_df)} new) to {csv_path}")
+    combined.to_pickle(data_path)
+    log.info(f"Saved {len(combined)} total rows ({len(new_df)} new) to {data_path}")
     return combined

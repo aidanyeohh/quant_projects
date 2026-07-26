@@ -5,7 +5,7 @@ Daily incremental update of NASDAQ insider Form 4 BUY/SELL transactions.
 Intended to run once a day (e.g. via cron) AFTER backfill_form4_history.py
 has established the base dataset -- it picks up automatically from
 `state.json`'s last_processed_date (shared with the backfill script) and
-appends only new filings to the same CSV.
+appends only new filings to the same parquet.
 
 Uses SEC's DAILY index (one file per calendar day, listing every filing
 by every company that day) rather than scanning per-company, since after
@@ -29,7 +29,7 @@ import form4_common as f4
 log = f4.log
 
 
-def run_daily_update(start_date=None, end_date=None, csv_path=f4.CSV_PATH, state_path=f4.STATE_PATH):
+def run_daily_update(start_date=None, end_date=None, data_path=f4.DATA_PATH, state_path=f4.STATE_PATH):
     state = f4.load_state(state_path)
     seen_accessions = set(state.get("seen_accessions", []))
 
@@ -99,7 +99,7 @@ def run_daily_update(start_date=None, end_date=None, csv_path=f4.CSV_PATH, state
     state["seen_accessions"] = sorted(seen_accessions)
     f4.save_state(state, state_path)
 
-    combined = f4.merge_and_save(all_new_rows, csv_path)
+    combined = f4.merge_and_save(all_new_rows, data_path)
     if not combined.empty and all_new_rows:
         print(combined.head(20).to_string())
 

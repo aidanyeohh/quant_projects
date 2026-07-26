@@ -2,7 +2,7 @@
 backtest_signals.py
 
 Event-study backtest of forward returns following NASDAQ insider Form 4
-transactions in insider_purchases.csv (produced by backfill_form4_history.py
+transactions in insider_purchases.pkl (produced by backfill_form4_history.py
 / daily_update_form4.py).
 
 For each transaction and each holding period (default: 5, 10, 20, 60, 120
@@ -16,8 +16,8 @@ trading days), computes:
   - benchmark_return            : same-window return of a benchmark index
   - abnormal_return             : raw_return - benchmark_return
 
-Results are saved at the individual-transaction level (backtest_results.csv)
-AND summarized by holding period x signal-quality slice (backtest_summary.csv):
+Results are saved at the individual-transaction level (backtest_results.pkl)
+AND summarized by holding period x signal-quality slice (backtest_summary.pkl):
   - overall
   - is_cluster_buy (True/False)
   - is_10b5_1_plan (True/False/Unknown)
@@ -38,7 +38,7 @@ IMPORTANT STATISTICAL CAVEATS -- READ BEFORE TRUSTING ANY NUMBER HERE
    which inflates apparent significance. Proper treatment needs clustered
    standard errors (by ticker and/or by calendar time) -- out of scope
    here, flagged so you don't over-trust a low p-value.
-3. market_cap in the source CSV is CURRENT market cap applied to
+3. market_cap in the source pkl is CURRENT market cap applied to
    historical rows -- fine for "how big is this company today" but not
    for a company-size control at the time of the historical trade.
 4. This is a historical backtest of a public, well-studied signal.
@@ -53,9 +53,12 @@ import time
 import argparse
 import logging
 from pathlib import Path
+import re
 
 import numpy as np
 import pandas as pd
+
+import form4_common as f4
 
 try:
     import yfinance as yf
@@ -69,13 +72,11 @@ log = logging.getLogger(__name__)
 # CONFIG
 # ---------------------------------------------------------------------------
 
-# data_output = "~/Desktop/Python_data/quant_projects/director_trading/data_output"
-data_output = "C:/Users/atsye/Desktop/Python_data/quant_projects/director_trading/data_output"
 
-INPUT_CSV = Path(f"{data_output}/ceo_pruchases.csv")
-RESULTS_CSV = Path(f"{data_output}/backtest_results.csv")
-SUMMARY_CSV = Path(f"{data_output}/backtest_summary.csv")
-PRICE_CACHE_DIR = Path(f"{data_output}/price_cache")
+INPUT_PKL = Path(f"{f4.data_output}/ceo_purchases.pkl")
+RESULTS_PKL = Path(f"{f4.data_output}/backtest_results.pkl")
+SUMMARY_PKL = Path(f"{f4.data_output}/backtest_summary.pkl")
+PRICE_CACHE_DIR = Path(f"{f4.data_output}/price_cache")
 PRICE_CACHE_DIR.mkdir(exist_ok=True)
 
 HOLDING_PERIODS_TRADING_DAYS = [5, 10, 20, 60, 120]
@@ -90,10 +91,11 @@ MAX_ENTRY_LAG_DAYS = 5  # if no trading day found within this many calendar days
 
 def get_price_history(ticker, start, end):
     """Fetch daily OHLC history for `ticker` between start/end (date-like),
-    cached to a local CSV so repeated backtest runs don't re-download."""
-    cache_path = PRICE_CACHE_DIR / f"{ticker.replace('/', '_')}.csv"
+    cached to a local PKL so repeated backtest runs don't re-download."""
+    cleaned_ticker = re.sub(r'[^a-zA-Z0-9\s]', '', ticker) 
+    cache_path = PRICE_CACHE_DIR / f"{cleaned_ticker.replace('/', '_')}.pkl"
     if cache_path.exists():
-        df = pd.read_csv(cache_path, index_col=0, parse_dates=True)
+        df = pd.read_pickle(cache_path)
         if not df.empty and df.index.min() <= pd.Timestamp(start) and df.index.max() >= pd.Timestamp(end):
             return df
 
@@ -111,7 +113,7 @@ def get_price_history(ticker, start, end):
         return df
 
     df.index = df.index.tz_localize(None)
-    df.to_csv(cache_path)
+    df.to_pickle(cache_path)
     return df
 
 
@@ -203,12 +205,13 @@ def bucket_10b5_1(val):
 # MAIN BACKTEST
 # ---------------------------------------------------------------------------
 
-def run_backtest(input_csv=INPUT_CSV, holding_periods=HOLDING_PERIODS_TRADING_DAYS,
+def run_backtest(input_pkl=INPUT_PKL, holding_periods=HOLDING_PERIODS_TRADING_DAYS,
                   benchmark_ticker=BENCHMARK_TICKER, only_buys=True):
-    if not Path(input_csv).exists():
-        raise SystemExit(f"{input_csv} not found -- run the backfill/daily scripts first.")
+    if not Path(input_pkl).exists():
+        raise SystemExit(f"{input_pkl} not found -- run the backfill/daily scripts first.")
 
-    df = pd.read_csv(input_csv, parse_dates=["date", "date_notified", "date_filed"])
+    df = pd.read_pickle(input_pkl)
+    df = df[~df['market_cap'].isna()]
     if only_buys:
         df = df[df["transaction_code"] == "Buy"].copy()
     df = df.dropna(subset=["date_filed", "ticker"])
@@ -218,6 +221,7 @@ def run_backtest(input_csv=INPUT_CSV, holding_periods=HOLDING_PERIODS_TRADING_DA
     end = pd.Timestamp.today()
 
     log.info(f"Fetching benchmark ({benchmark_ticker}) price history...")
+
     benchmark_df = get_price_history(benchmark_ticker, start, end)
 
     results = []
@@ -271,12 +275,12 @@ def run_backtest(input_csv=INPUT_CSV, holding_periods=HOLDING_PERIODS_TRADING_DA
         log.warning("No events could be matched to price data -- nothing to summarize.")
         return results_df, pd.DataFrame()
 
-    results_df.to_csv(RESULTS_CSV, index=False)
-    log.info(f"Saved {len(results_df)} event-level results to {RESULTS_CSV}")
+    results_df.to_pickle(RESULTS_PKL)
+    log.info(f"Saved {len(results_df)} event-level results to {RESULTS_PKL}")
 
     summary_df = summarize(results_df, holding_periods)
-    summary_df.to_csv(SUMMARY_CSV, index=False)
-    log.info(f"Saved summary to {SUMMARY_CSV}")
+    summary_df.to_pickle(SUMMARY_PKL)
+    log.info(f"Saved summary to {SUMMARY_PKL}")
 
     return results_df, summary_df
 
@@ -323,7 +327,7 @@ def summarize(results_df, holding_periods):
 
 def main():
     parser = argparse.ArgumentParser(description="Backtest forward returns after insider Form 4 signals.")
-    parser.add_argument("--input", type=str, default=str(INPUT_CSV))
+    parser.add_argument("--input", type=str, default=str(INPUT_PKL))
     parser.add_argument("--benchmark", type=str, default=BENCHMARK_TICKER)
     parser.add_argument("--include-sells", action="store_true",
                          help="Also backtest Sell transactions (default: Buys only)")
@@ -336,7 +340,7 @@ def main():
         holding_periods = [int(x) for x in args.holding_periods.split(",")]
 
     results_df, summary_df = run_backtest(
-        input_csv=Path(args.input),
+        input_pkl=Path(args.input),
         holding_periods=holding_periods,
         benchmark_ticker=args.benchmark,
         only_buys=not args.include_sells,

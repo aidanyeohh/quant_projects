@@ -48,7 +48,7 @@ log = f4.log
 
 
 def run_backfill(start_year=2000, start_quarter=1, end_year=None, end_quarter=None,
-                  csv_path=f4.CSV_PATH, state_path=f4.STATE_PATH):
+                  data_path=f4.DATA_PATH, state_path=f4.STATE_PATH):
     if end_year is None or end_quarter is None:
         end_year, end_quarter = f4.current_year_quarter()
 
@@ -121,12 +121,12 @@ def run_backfill(start_year=2000, start_quarter=1, end_year=None, end_quarter=No
             if i % 250 == 0:
                 log.info(f"  ...{i}/{len(filings)} filings checked in this quarter, "
                          f"{len(new_rows)} transaction rows found so far")
-                f4.merge_and_save(new_rows, csv_path, compute_clusters=False)
+                f4.merge_and_save(new_rows, data_path, compute_clusters=False)
                 new_rows = []
                 state["seen_accessions"] = sorted(seen_accessions)
                 f4.save_state(state, state_path)
 
-        f4.merge_and_save(new_rows, csv_path, compute_clusters=True)
+        f4.merge_and_save(new_rows, data_path, compute_clusters=True)
         _checkpoint(state, state_path, year, quarter, seen_accessions)
         log.info(f"  quarter complete: {new_count} new filings processed")
 
