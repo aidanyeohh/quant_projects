@@ -43,10 +43,7 @@ log = logging.getLogger(__name__)
 # CONFIG (shared by both scripts)
 # ---------------------------------------------------------------------------
 
-# data_output = "~/Desktop/Python_data/quant_projects/director_trading/data_output"
-data_output = "C:/Users/atsye/Desktop/Python_data/quant_projects/director_trading/data_output"
-
-SEC_USER_AGENT = "yoyoman021.@gmail.com"
+SEC_USER_AGENT = "test.@gmail.com"
 SEC_HEADERS = {"User-Agent": SEC_USER_AGENT}
 
 REQUEST_DELAY_SEC = 0.15  # ~6-7 req/sec, under SEC's 10 req/sec limit
