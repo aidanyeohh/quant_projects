@@ -88,17 +88,17 @@ MAX_ENTRY_LAG_DAYS = 5  # if no trading day found within this many calendar days
 # ---------------------------------------------------------------------------
 # PRICE DATA (cached to disk so re-runs don't re-hit yfinance every time)
 # ---------------------------------------------------------------------------
-
+ 
 def get_price_history(ticker, start, end):
     """Fetch daily OHLC history for `ticker` between start/end (date-like),
-    cached to a local PKL so repeated backtest runs don't re-download."""
-    cleaned_ticker = re.sub(r'[^a-zA-Z0-9\s]', '', ticker) 
+    cached to a local pickle so repeated backtest runs don't re-download."""
+    cleaned_ticker = re.sub(r'[^a-zA-Z0-9 ]', '', ticker)
     cache_path = PRICE_CACHE_DIR / f"{cleaned_ticker.replace('/', '_')}.pkl"
     if cache_path.exists():
         df = pd.read_pickle(cache_path)
         if not df.empty and df.index.min() <= pd.Timestamp(start) and df.index.max() >= pd.Timestamp(end):
             return df
-
+ 
     try:
         df = yf.Ticker(ticker).history(
             start=pd.Timestamp(start) - pd.Timedelta(days=10),
@@ -108,15 +108,15 @@ def get_price_history(ticker, start, end):
     except Exception as e:
         log.warning(f"  failed to download price history for {ticker}: {e}")
         return pd.DataFrame()
-
+ 
     if df.empty:
         return df
-
+ 
     df.index = df.index.tz_localize(None)
     df.to_pickle(cache_path)
     return df
-
-
+ 
+ 
 def _next_trading_day_on_or_after(price_df, target_date):
     """Return the first index (trading date) in price_df on or after
     target_date, or None if none exists within MAX_ENTRY_LAG_DAYS."""
@@ -127,24 +127,24 @@ def _next_trading_day_on_or_after(price_df, target_date):
     if (first - pd.Timestamp(target_date)).days > MAX_ENTRY_LAG_DAYS:
         return None
     return first
-
-
+ 
+ 
 def compute_event_returns(price_df, filing_date, holding_periods):
     """Given a ticker's price history and a filing date, compute entry
     price (next trading day's open) and exit price/return for each
     holding period (in trading days from entry). Returns a dict."""
     if price_df.empty:
         return None
-
+ 
     entry_date = _next_trading_day_on_or_after(price_df, pd.Timestamp(filing_date) + pd.Timedelta(days=1))
     if entry_date is None:
         return None
-
+ 
     entry_idx = price_df.index.get_loc(entry_date)
     entry_price = price_df["Open"].iloc[entry_idx]
     if pd.isna(entry_price) or entry_price <= 0:
         return None
-
+ 
     out = {"entry_date": entry_date, "entry_price": entry_price}
     for h in holding_periods:
         exit_idx = entry_idx + h
@@ -159,12 +159,12 @@ def compute_event_returns(price_df, filing_date, holding_periods):
         out[f"exit_price_{h}d"] = exit_price
         out[f"raw_return_{h}d"] = (exit_price / entry_price) - 1 if pd.notna(exit_price) else None
     return out
-
-
+ 
+ 
 # ---------------------------------------------------------------------------
 # SIGNAL-QUALITY BUCKETING (for slicing the summary)
 # ---------------------------------------------------------------------------
-
+ 
 def bucket_position(position):
     if not isinstance(position, str) or not position.strip():
         return "Unknown"
@@ -182,8 +182,8 @@ def bucket_position(position):
     if "10% OWNER" in p:
         return "10% Owner"
     return "Other Officer"
-
-
+ 
+ 
 def bucket_pct_of_holdings(pct):
     if pd.isna(pct):
         return "Unknown"
@@ -194,69 +194,88 @@ def bucket_pct_of_holdings(pct):
     if pct < 0.50:
         return "20-50%"
     return "50%+"
-
-
+ 
+ 
 def bucket_10b5_1(val):
     if pd.isna(val):
         return "Unknown"
     return "10b5-1 Plan" if val else "Discretionary"
-
+ 
+ 
 # ---------------------------------------------------------------------------
 # MAIN BACKTEST
 # ---------------------------------------------------------------------------
-
-def run_backtest(input_pkl=INPUT_PKL, holding_periods=HOLDING_PERIODS_TRADING_DAYS,
-                  benchmark_ticker=BENCHMARK_TICKER, only_buys=True):
-    if not Path(input_pkl).exists():
-        raise SystemExit(f"{input_pkl} not found -- run the backfill/daily scripts first.")
-
-    df = pd.read_pickle(input_pkl)
+ 
+def run_backtest(input_path=INPUT_PKL, holding_periods=HOLDING_PERIODS_TRADING_DAYS,
+                  benchmark_ticker=BENCHMARK_TICKER, only_buys=True, event_window_days=3):
+    if not Path(input_path).exists():
+        raise SystemExit(f"{input_path} not found -- run the backfill/daily scripts first.")
+ 
+    df = pd.read_pickle(input_path)
     df = df[~df['market_cap'].isna()]
     if only_buys:
         df = df[df["transaction_code"] == "Buy"].copy()
     df = df.dropna(subset=["date_filed", "ticker"])
     log.info(f"Backtesting {len(df)} transactions across {df['ticker'].nunique()} tickers...")
-
+ 
     start = df["date_filed"].min()
     end = pd.Timestamp.today()
-
+ 
     log.info(f"Fetching benchmark ({benchmark_ticker}) price history...")
-
     benchmark_df = get_price_history(benchmark_ticker, start, end)
-
+ 
+    # near_corporate_event: was there an 8-K (earnings, M&A, guidance,
+    # etc) filed within +/-event_window_days of this Form 4? Lets you
+    # separate "insider bought right after a strong earnings beat" from
+    # a genuinely isolated insider-buy signal -- see signal_regression.py
+    # for the fuller regression-based treatment of this same confound.
+    nasdaq_ciks = f4.get_nasdaq_ciks()
+    ticker_to_cik = {v["ticker"]: k for k, v in nasdaq_ciks.items()}
+    log.info(f"Fetching 8-K filing dates ({start.date()} to {end.date()})...")
+    cik_to_8k_dates = f4.fetch_8k_dates(nasdaq_ciks, start, end)
+ 
     results = []
     for i, (ticker, group) in enumerate(df.groupby("ticker"), 1):
         if i % 100 == 0:
             log.info(f"  ...{i}/{df['ticker'].nunique()} tickers processed")
-
+ 
         price_df = get_price_history(ticker, group["date_filed"].min(), end)
         time.sleep(0.05)  # light courtesy delay for yfinance
         if price_df.empty:
             continue
-
+ 
+        cik = ticker_to_cik.get(ticker)
+ 
         for _, row in group.iterrows():
             event = compute_event_returns(price_df, row["date_filed"], holding_periods)
             if event is None:
                 continue
-
+ 
             benchmark_event = compute_event_returns(benchmark_df, row["date_filed"], holding_periods) \
                 if not benchmark_df.empty else None
-
+ 
             result = {
                 "accession": row["accession"],
                 "ticker": ticker,
+                "company_name": row.get("company_name"),
+                "market_cap": row.get("market_cap"),
                 "director": row["director"],
                 "position": row["position"],
                 "position_bucket": bucket_position(row["position"]),
                 "transaction_code": row["transaction_code"],
+                "shares": row.get("shares"),
+                "price_per_share": row.get("price_per_share"),
                 "date_filed": row["date_filed"],
                 "transaction_value": row["transaction_value"],
                 "pct_of_holdings": row["pct_of_holdings"],
                 "pct_of_holdings_bucket": bucket_pct_of_holdings(row["pct_of_holdings"]),
                 "ownership_form": row["ownership_form"],
-                "cluster_buy_count": row["cluster_buy_count"],
+                "is_cluster_buy": row["is_cluster_buy"],
                 "is_10b5_1_plan": row["is_10b5_1_plan"],
                 "is_10b5_1_bucket": bucket_10b5_1(row["is_10b5_1_plan"]),
+                "near_corporate_event": f4.compute_near_corporate_event(
+                    cik, row["date_filed"], cik_to_8k_dates, window_days=event_window_days
+                ),
                 "entry_date": event["entry_date"],
                 "entry_price": event["entry_price"],
             }
@@ -269,35 +288,36 @@ def run_backtest(input_pkl=INPUT_PKL, holding_periods=HOLDING_PERIODS_TRADING_DA
                     raw_ret - bench_ret if raw_ret is not None and bench_ret is not None else None
                 )
             results.append(result)
-
+ 
     results_df = pd.DataFrame(results)
     if results_df.empty:
         log.warning("No events could be matched to price data -- nothing to summarize.")
         return results_df, pd.DataFrame()
-
+ 
     results_df.to_pickle(RESULTS_PKL)
     log.info(f"Saved {len(results_df)} event-level results to {RESULTS_PKL}")
-
+ 
     summary_df = summarize(results_df, holding_periods)
     summary_df.to_pickle(SUMMARY_PKL)
     log.info(f"Saved summary to {SUMMARY_PKL}")
-
+ 
     return results_df, summary_df
-
-
+ 
+ 
 def summarize(results_df, holding_periods):
     """Build a long-format summary: one row per (slice_type, slice_value,
     holding_period) with mean/median abnormal return, hit rate, count, and
     a rough t-stat."""
     slice_cols = {
         "overall": None,
-        "cluster_buy_count": "cluster_buy_count",
+        "is_cluster_buy": "is_cluster_buy",
         "is_10b5_1_bucket": "is_10b5_1_bucket",
         "position_bucket": "position_bucket",
         "pct_of_holdings_bucket": "pct_of_holdings_bucket",
         "ownership_form": "ownership_form",
+        "near_corporate_event": "near_corporate_event",
     }
-
+ 
     rows = []
     for slice_name, col in slice_cols.items():
         groups = [("all", results_df)] if col is None else list(results_df.groupby(col))
@@ -323,8 +343,8 @@ def summarize(results_df, holding_periods):
                     }
                 )
     return pd.DataFrame(rows)
-
-
+ 
+ 
 def main():
     parser = argparse.ArgumentParser(description="Backtest forward returns after insider Form 4 signals.")
     parser.add_argument("--input", type=str, default=str(INPUT_PKL))
@@ -333,23 +353,26 @@ def main():
                          help="Also backtest Sell transactions (default: Buys only)")
     parser.add_argument("--holding-periods", type=str, default=None,
                          help="Comma-separated trading-day holding periods, e.g. 5,10,20,60")
+    parser.add_argument("--event-window", type=int, default=3,
+                         help="Calendar days on either side counting as 'near' an 8-K")
     args = parser.parse_args()
-
+ 
     holding_periods = HOLDING_PERIODS_TRADING_DAYS
     if args.holding_periods:
         holding_periods = [int(x) for x in args.holding_periods.split(",")]
-
+ 
     results_df, summary_df = run_backtest(
-        input_pkl=Path(args.input),
+        input_path=Path(args.input),
         holding_periods=holding_periods,
         benchmark_ticker=args.benchmark,
         only_buys=not args.include_sells,
+        event_window_days=args.event_window,
     )
-
+ 
     if not summary_df.empty:
         pd.set_option("display.width", 160)
         print(summary_df.sort_values(["slice_type", "holding_days"]).to_string(index=False))
-
-
+ 
+ 
 if __name__ == "__main__":
     main()

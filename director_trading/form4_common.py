@@ -29,6 +29,7 @@ import pickle
 
 import requests
 import pandas as pd
+import numpy as np
 
 try:
     import yfinance as yf
@@ -112,10 +113,16 @@ def get_nasdaq_ciks(cache_path=NASDAQ_CACHE_PATH, max_age_days=NASDAQ_CACHE_MAX_
 import re  # noqa: E402  (kept near point of use for readability)
  
  
-def parse_master_index(raw_bytes, nasdaq_ciks):
+def parse_master_index(raw_bytes, nasdaq_ciks, form_types=("4",)):
     """Parse a master.idx file's raw bytes (daily or quarterly -- same
-    format) and return only Form 4 filings whose CIK is in nasdaq_ciks.
-    Returns a list of dicts: {cik, company_name, date, accession}."""
+    format) and return only filings of the given form_type(s) whose CIK
+    is in nasdaq_ciks. Returns a list of dicts: {cik, company_name, date,
+    accession}.
+ 
+    form_types defaults to Form 4 only (the original use case). Other
+    callers (e.g. signal_regression.py, which wants 8-K filing dates as a
+    "was there other company news nearby" control) can pass a different
+    set, like form_types=("8-K",)."""
     text = raw_bytes.decode("latin-1")  # SEC's .idx files are latin-1, not utf-8
     lines = text.splitlines()
  
@@ -132,7 +139,7 @@ def parse_master_index(raw_bytes, nasdaq_ciks):
         if len(parts) != 5:
             continue
         cik_str, company_name, form_type, date_filed, filename = parts
-        if form_type != "4":
+        if form_type not in form_types:
             continue
         cik = int(cik_str)
         if cik not in nasdaq_ciks:
@@ -150,7 +157,7 @@ def parse_master_index(raw_bytes, nasdaq_ciks):
     return filings
  
  
-def fetch_daily_index(day, nasdaq_ciks):
+def fetch_daily_index(day, nasdaq_ciks, form_types=("4",)):
     """Fetch SEC's daily master index for a single date. Returns None if
     no index was published for that date (weekend/holiday)."""
     quarter = (day.month - 1) // 3 + 1
@@ -159,13 +166,13 @@ def fetch_daily_index(day, nasdaq_ciks):
         f"master.{day.strftime('%Y%m%d')}.idx"
     )
     r = requests.get(url, headers=SEC_HEADERS, timeout=60)
-    if r.status_code != 200:
+    if r.status_code == 404:
         return None
     r.raise_for_status()
-    return parse_master_index(r.content, nasdaq_ciks)
+    return parse_master_index(r.content, nasdaq_ciks, form_types=form_types)
  
  
-def fetch_quarterly_index(year, quarter, nasdaq_ciks):
+def fetch_quarterly_index(year, quarter, nasdaq_ciks, form_types=("4",)):
     """Fetch SEC's quarterly full-index master file, covering ALL filings
     for that entire quarter in one download. This is the efficient way to
     do a multi-year backfill -- ~104 requests covers 2000-present, versus
@@ -175,7 +182,7 @@ def fetch_quarterly_index(year, quarter, nasdaq_ciks):
     if r.status_code == 404:
         return None
     r.raise_for_status()
-    return parse_master_index(r.content, nasdaq_ciks)
+    return parse_master_index(r.content, nasdaq_ciks, form_types=form_types)
  
  
 def iter_quarters(start_year, start_quarter, end_year, end_quarter):
@@ -192,6 +199,80 @@ def iter_quarters(start_year, start_quarter, end_year, end_quarter):
 def current_year_quarter():
     today = date.today()
     return today.year, (today.month - 1) // 3 + 1
+ 
+ 
+# ---------------------------------------------------------------------------
+# 8-K PROXIMITY (shared "was there other company news nearby" helper)
+#
+# SEC requires an 8-K within 4 business days of most material events --
+# earnings releases, M&A, guidance changes, restructuring, executive
+# changes, etc. "Was there an 8-K near this Form 4" is a blunt but broad,
+# full-history, essentially-free proxy for "something else newsworthy
+# happened right around this trade" -- reuses the exact same master-index
+# infrastructure as Form 4 discovery, just filtered to form type 8-K, and
+# only needs filing DATES (no per-filing document download).
+# ---------------------------------------------------------------------------
+ 
+EIGHTK_CACHE_PATH = Path("eightk_dates_cache.csv")
+ 
+ 
+def fetch_8k_dates(nasdaq_ciks, start_date, end_date, cache_path=EIGHTK_CACHE_PATH):
+    """Return {cik: sorted numpy array of datetime64 8-K filing dates}
+    covering [start_date, end_date]. Cached to disk since rebuilding is
+    ~1 request per quarter but each quarterly index file is several MB."""
+    if cache_path.exists():
+        cached = pd.read_csv(cache_path, parse_dates=["date"])
+        if cached["date"].min() <= pd.Timestamp(start_date) and cached["date"].max() >= pd.Timestamp(end_date):
+            log.info(f"Using cached 8-K filing dates ({cache_path})")
+            return _to_cik_date_map(cached)
+        log.info("8-K cache doesn't cover the requested range -- refreshing")
+ 
+    start_year, start_quarter = start_date.year, (start_date.month - 1) // 3 + 1
+    end_year, end_quarter = end_date.year, (end_date.month - 1) // 3 + 1
+ 
+    all_rows = []
+    for year, quarter in iter_quarters(start_year, start_quarter, end_year, end_quarter):
+        log.info(f"  fetching 8-K index for {year} QTR{quarter}...")
+        filings = fetch_quarterly_index(year, quarter, nasdaq_ciks, form_types=("8-K",))
+        time.sleep(REQUEST_DELAY_SEC)
+        if not filings:
+            continue
+        for f in filings:
+            all_rows.append({"cik": f["cik"], "date": f["date"]})
+ 
+    df = pd.DataFrame(all_rows)
+    if df.empty:
+        log.warning("No 8-K filings found in this range.")
+        return {}
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"]).drop_duplicates()
+    df.to_csv(cache_path, index=False)
+    log.info(f"Cached {len(df)} 8-K filing dates to {cache_path}")
+    return _to_cik_date_map(df)
+ 
+ 
+def _to_cik_date_map(df):
+    out = {}
+    for cik, group in df.groupby("cik"):
+        out[cik] = np.sort(group["date"].to_numpy())
+    return out
+ 
+ 
+def compute_near_corporate_event(cik, event_date, cik_to_8k_dates, window_days=3):
+    """True if `cik` filed an 8-K within +/- window_days calendar days of
+    event_date. False (not NaN) if the CIK has no known 8-K history or
+    event_date is missing -- absence of evidence isn't treated as a
+    special case here, just "not flagged as near an event"."""
+    dates = cik_to_8k_dates.get(cik)
+    if dates is None or len(dates) == 0 or pd.isna(event_date):
+        return False
+    event_date = np.datetime64(pd.Timestamp(event_date), "D")
+    idx = np.searchsorted(dates, event_date)
+    candidates = dates[max(0, idx - 1): idx + 2]  # the 1-2 nearest dates on either side
+    if len(candidates) == 0:
+        return False
+    min_gap_days = np.min(np.abs((candidates - event_date).astype("timedelta64[D]").astype(int)))
+    return bool(min_gap_days <= window_days)
  
  
 # ---------------------------------------------------------------------------
@@ -343,9 +424,6 @@ def parse_form4_for_insider_transactions(cik, accession, doc):
  
         date_el = txn.find(".//transactionDate/value")
         txn_date = date_el.text if date_el is not None else None
-
-        date_filed_el = root.find(".//ownerSignature/signatureDate")
-        date_filed = date_filed_el.text if date_filed_el is not None else None
  
         title_el = txn.find(".//securityTitle/value")
         title_of_security = title_el.text.strip() if title_el is not None and title_el.text else None
@@ -380,12 +458,13 @@ def parse_form4_for_insider_transactions(cik, accession, doc):
  
         results.append(
             {
+                # "date" and "date_notified" both come from
                 # transactionDate/value (the date the insider actually
                 # traded). If you want a separate "date SEC received the
                 # filing" column, that's available from the index's
                 # date_filed field -- ask and I can wire it through.
                 "date": txn_date,
-                "date_filed": date_filed,
+                "date_notified": txn_date,
                 "shares": shares,
                 "price_per_share": price,
                 "transaction_value": transaction_value,
@@ -487,13 +566,15 @@ def add_cluster_signal(df, window_days=CLUSTER_WINDOW_DAYS):
  
  
 # ---------------------------------------------------------------------------
-# Pickle MERGE (append-safe, deduplicated)
+# DATA MERGE (append-safe, deduplicated) -- persisted as pickle so exact
+# dtypes (datetimes, booleans, NaN/None distinctions) round-trip cleanly
+# without needing parse_dates/converters on every read.
 # ---------------------------------------------------------------------------
  
 def merge_and_save(new_rows, data_path=DATA_PATH, compute_clusters=True):
     """Take a list of raw transaction dicts, enrich with market cap, merge
-    with any existing Pickle (deduplicated), and save. Returns the combined
-    DataFrame.
+    with any existing pickle file (deduplicated), and save. Returns the
+    combined DataFrame.
  
     `compute_clusters=False` skips the (whole-dataset) cluster-buy pass --
     useful for cheap intermediate checkpoints during a large backfill,
@@ -507,6 +588,7 @@ def merge_and_save(new_rows, data_path=DATA_PATH, compute_clusters=True):
  
     new_df = pd.DataFrame(new_rows)
     new_df["date"] = pd.to_datetime(new_df["date"], errors="coerce")
+    new_df["date_notified"] = pd.to_datetime(new_df["date_notified"], errors="coerce")
     new_df["date_filed"] = pd.to_datetime(new_df["date_filed"], errors="coerce")
     new_df = new_df.dropna(subset=["shares"])
  
@@ -515,8 +597,7 @@ def merge_and_save(new_rows, data_path=DATA_PATH, compute_clusters=True):
     new_df = new_df.reindex(columns=FINAL_COLUMNS)
  
     if data_path.exists():
-        existing_df = pd.read_picle(data_path)
-        existing_df['date'] = pd.to_datetime(existing_df['date'], errors='coerce')
+        existing_df = pd.read_pickle(data_path)
         combined = pd.concat([existing_df, new_df], ignore_index=True)
         combined = combined.drop_duplicates(
             subset=["accession", "date", "shares", "price_per_share", "director", "transaction_code"]
@@ -528,7 +609,7 @@ def merge_and_save(new_rows, data_path=DATA_PATH, compute_clusters=True):
         log.info("Computing cluster-buy signal...")
         combined = add_cluster_signal(combined)
  
-    combined = combined.sort_values("date_filed", ascending=False).reset_index(drop=True)
+    combined = combined.sort_values("date", ascending=False).reset_index(drop=True)
     combined.to_pickle(data_path)
     log.info(f"Saved {len(combined)} total rows ({len(new_df)} new) to {data_path}")
     return combined
