@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Data and generated outputs
+momentum_reversal/data/
+momentum_reversal/results/
+director_trading/eightk_dates_cache.csv
+
+# Other branches' working dirs
+hidformer_stock_price_forecasting/
