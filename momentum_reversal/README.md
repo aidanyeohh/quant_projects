@@ -1,276 +1,317 @@
-# ASX Statistical Arbitrage: Momentum and Reversal
+# Channel-Breakout Momentum on the ASX 500
 
-Course project for The Wall Street Quants, transplanted from crypto to
-Australian equities. The goal is unchanged: find cross-sectional price-volume
-patterns that predict returns, trade them in an unconstrained dollar-neutral
-book, and report performance honestly net of costs.
+Course project (The Wall Street Quants, *Statistical Arbitrage*): research a profitable
+momentum strategy. The brief's crypto universe is swapped for Australian equities here.
+The topic is **Donchian channel breakouts** on a point-in-time ASX 500 universe.
 
-## Why the ASX changes the problem
+## Headline result
 
-The brief was written for crypto, where the market never closes, there is no
-corporate action to speak of, and every asset that ever traded still has a
-price series. Three of those assumptions break on the ASX.
+A dollar-neutral 250-day Donchian breakout pays off. It enters on a close beyond the 250-day
+high or low, exits on a 125-day channel in the other direction, and trades at the next
+day's close. It earns about 6–10% a year of alpha with beta near zero, in a 2017–2026
+out-of-sample period that played no part in choosing it. Short-horizon breakouts (5–50 days)
+lose money because they **reverse**, which is the brief's "short horizon → reversal,
+long horizon → momentum" pattern.
 
-**Companies die.** Roughly half the names that traded on the ASX in 2010 are no
-longer listed. If the backtest universe is today's S&P/ASX 300, the sample
-contains only the companies that survived, and a momentum backtest on that
-sample is close to guaranteed to look good: the names momentum would have been
-short are exactly the ones that later delisted and dropped out of the list. See
-[Survivorship](#survivorship) below - it is the central design constraint of
-this repository, not a footnote.
+| Strategy (net of 20 bps, next-day execution, drifting holdings) | Period | Ann. ret | Ann. vol | Sharpe | Max DD | Alpha vs EW500 (t) | Beta vs ASX200 |
+|---|---|---|---|---|---|---|---|
+| **Implementable: long ASX 500, short top-200 only** | IS 2006–16 | 9.4% | 7.9% | 1.19 | −20.5% | 9.3% (3.5) | −0.08 |
+| | **OOS 2017–26** | **6.3%** | **8.2%** | **0.76** | **−11.5%** | **5.4% (2.2)** | **−0.08** |
+| Same, 10% vol target | IS | 12.2% | 10.7% | 1.14 | −23.4% | 12.0% (3.3) | −0.09 |
+| | OOS | 7.9% | 10.6% | 0.75 | −17.3% | 6.9% (2.1) | −0.10 |
+| Research: long/short across all 500 | IS | 10.5% | 7.0% | 1.51 | −18.2% | 10.1% (4.4) | 0.03 |
+| | OOS | 10.3% | 6.9% | 1.50 | −8.6% | 9.2% (4.1) | 0.02 |
+| Long-only breakouts | IS | 14.6% | 18.4% | 0.80 | −60.3% | 9.2% (3.8) | 0.71 |
+| | OOS | 19.3% | 19.6% | 0.98 | −44.1% | 10.2% (5.4) | 0.93 |
+| *Benchmark: equal-weight ASX 500 (drifting)* | IS | 6.0% | 18.3% | 0.33 | −68.3% | — | 0.78 |
+| | OOS | 10.1% | 20.7% | 0.49 | −45.8% | — | 1.00 |
 
-**The market is shut most of the time.** The brief's seasonality section asks
-about weekday-versus-weekend and institutional-versus-retail hours. On the ASX
-the weekend question disappears and is replaced by a sharper one: the 30 June
-Australian financial year end concentrates tax-loss selling into May and June
-and produces a July bounce, and the February and August reporting seasons are
-when new information arrives in bulk. `signals.financial_year_flags` exposes
-both.
+Alpha is annualised, from a regression of daily returns on the equal-weight ASX 500 with
+Newey-West (10-lag) t-stats. Full tables are in [results/05_final_strategies.csv](results/05_final_strategies.csv).
 
-**The cross-section is small and top-heavy.** BHP, CBA and CSL are a large
-share of the index, and the resources-versus-financials axis dominates
-co-movement. A naive long-short book is really a bet on iron ore. The residual
-signals in `signals.residual_returns` strip statistical factors out before the
-reversal signal is computed, which is the brief's "Security A minus something
-correlated to it" idea done without needing a sector classification.
+![equity curves](results/equity_curves.png)
 
-## Layout
+## Data and universe
 
-```
-src/asxstat/
-  config.py        parameters: universe rules, cost model, backtest settings
-  universe.py      ticker-space recovery and point-in-time membership
-  download.py      bulk daily OHLCV into wide parquet panels
-  clean.py         bad ticks, untraded days, delisting detection
-  signals.py       momentum, reversal, conditioners, seasonality
-  backtest.py      dollar-neutral book, costs, information coefficient
-  metrics.py       returns, vol, Sharpe, drawdown, alpha/beta
-  survivorship.py  bias measurement and stress scenarios
-scripts/
-  01_probe_universe.py      scan AAA..ZZZ for every ASX code with history
-  02_download_prices.py     pull daily data for the recovered pool
-  03_run_baseline.py        signals, IC, cost sweep, survivorship stress
-  04_momentum_robustness.py momentum across universe sizes
-tests/
-  test_pipeline.py       end-to-end smoke test on synthetic data
-```
+* **Prices:** daily OHLCV from Yahoo Finance for all 2,048 currently listed ASX codes,
+  2005–2026 ([01_data_and_universe.ipynb](01_data_and_universe.ipynb)). ETFs, LICs and trusts (GICS = "Not Applic") are dropped.
+* **Point-in-time ASX 500** ([01_data_and_universe.ipynb](01_data_and_universe.ipynb)): there is no free historical list of
+  members, so the universe is rebuilt each month end. It takes the top 500 stocks by 63-day
+  median traded value, among stocks priced ≥ $0.10 with at least 252 days of history. It is
+  applied from the next trading day.
+* **Cleaning:** prices ≤ 0 are removed. Returns are masked for one-day spikes that reverse
+  (bad prints), for moves over +400% or under −80%, and for zero-volume days. They are also
+  masked where Yahoo's adjustment factor breaks. For example, TAH.AX on 2009-02-10 shows a
+  4.5× adjusted move while the raw close fell 6%. That single print was worth +29% in one day
+  to an early version of the backtest.
+* **Benchmarks:** ASX 200 (^AXJO), plus an equal-weight ASX 500 built the same way as the
+  strategy: positions drift with price, joiners enter at the average weight, and leavers exit.
+  It carries the same survivorship bias as the strategy, so alpha is measured against it.
 
-## Running it
+## Method
 
-```bash
-pip install -r requirements.txt
-python -m pytest tests/test_pipeline.py -q     # 3 seconds, run this first
-python scripts/01_probe_universe.py            # ~1 hr, resumable
-python scripts/02_download_prices.py --start 2005-01-01
-python scripts/03_run_baseline.py --start 2010-01-01 --universe-size 300
-python scripts/04_momentum_robustness.py --start 2010-01-01
-```
+**Signal** ([02_channel_breakout_research.ipynb](02_channel_breakout_research.ipynb), `donchian_state`):
 
-Steps 1 and 2 cache to `data/raw` after every chunk, so an interrupted run
-resumes rather than restarting.
+* Long entry: close > highest high of the prior N days. Exit: close < lowest low of the prior M days.
+* Short entry: close < lowest low of the prior N days. Exit: close > highest high of the prior M days.
+* A position is closed when the stock leaves the universe.
 
-Yahoo silently returns empty frames for perfectly valid symbols when it decides
-a request is too large or too frequent, which would be recorded as a delisting
-and quietly corrupt the whole exercise. Step 1 defends against this by sending a
-canary ticker in every chunk and retrying with backoff when the canary comes
-back empty; step 2 repeats its passes until no new tickers arrive. Both are
-worth keeping if the code is reused.
+**Portfolio** ([02_channel_breakout_research.ipynb](02_channel_breakout_research.ipynb), `backtest_drift`). This is a holdings-based
+version of the course's unconstrained backtest:
 
-## Survivorship
+* The long side targets +0.5 of capital and the short side −0.5, so gross is 1 and the book
+  is dollar neutral.
+* A new entry gets an equal share of its side (side gross ÷ number of names on that side).
+  The other names on that side are scaled down pro rata to make room.
+* Held positions then **drift with price**. They are not reset to equal weight each day.
+* Every trade is charged, including the pro-rata scaling.
+* Signals from day *t*'s close are traded at day *t+1*'s close (`lag=2`), or at day *t*'s
+  close (`lag=1`) as a comparison.
 
-Three separate problems hide under the one label. The repository treats them
-separately because they need different fixes.
+**Why holdings drift.** The first version reset every name to equal weight daily and charged
+only for changes in target weights. The Monte Carlo test below showed that this flatters any
+equal-weight portfolio on ASX closing prices: random stocks reset daily earn a Sharpe of about
+2. The cause is bid-ask bounce and stale closes in small caps, which a daily reset quietly
+harvests. The drift engine reproduces a static buy-and-hold portfolio exactly, and all
+results here use it.
 
-**1. Universe selection.** Solved structurally. `universe.point_in_time_universe`
-rebuilds membership at each month end from trailing 60-day median turnover,
-using only data available at that date. Index membership is never consulted, so
-no forward-looking constituent list can leak in. `survivorship.survivor_only_members`
-builds the biased version deliberately, so the size of the effect is a measured
-number in the results rather than a claim in the write-up.
+**Costs:** 20 bps per unit of one-way turnover (market orders), with 7 bps (limit orders)
+and 50 bps as sensitivities.
 
-**2. Missing dead companies. Attempted, and it failed - this is the important
-result in the repository.** Almost every ASX ordinary share has a three-letter
-code, so `universe.probe_ticker_space` scans all 17,576 of AAA through ZZZ with
-cheap monthly bars. That candidate set is independent of survival, unlike any
-constituent list, so in principle it recovers companies no constituent list
-would mention.
+**Discipline:** every design choice (N, M, volume filter, execution lag, vol target) was made
+on **2006–2016 only**. 2017–2026 was then run once as the out-of-sample check.
 
-It does not, because the data is not there to recover. The full scan found
-**1,637 ASX tickers with at least two years of history, of which 8 have stopped
-trading.** Yahoo has purged essentially every delisted Australian name: `OZL`,
-`SYD`, `CCL`, `CWN`, `WSA` and `SLR` were all acquired between 2021 and 2024 and
-all return nothing. Stooq, the obvious free alternative, now gates scripted
-access behind a JavaScript challenge.
+## Findings by research question
 
-So the sample here **is** survivor-only and cannot be fixed with free data.
-Fixing it properly needs a vendor that keeps delisted securities and historical
-index membership - Norgate Data is the Australian one built for exactly this
-job. Everything below is what to do instead when that is not available.
+### 1. Time horizon: reversal at short horizons, momentum at long ones
+![horizon sweep](results/horizon_sweep.png)
 
-**3. Bounding the bias instead of removing it.** Two independent bounds, both in
-`scripts/03_run_baseline.py`.
+| N (days) | 5 | 20 | 50 | 100 | 150 | 200 | **250** | 300 | 400 |
+|---|---|---|---|---|---|---|---|---|---|
+| IS Sharpe (next-day) | −7.8 | −2.8 | −0.5 | 0.7 | 1.1 | 1.2 | **1.51** | 1.0 | 1.0 |
+| OOS Sharpe (next-day) | −4.0 | −0.6 | 0.2 | 0.9 | 1.2 | 1.5 | **1.50** | 1.4 | 1.2 |
 
-*Simulated deaths.* `survivorship.simulate_delistings` injects delistings into
-the survivor-only panel at a configurable annual hazard, then reruns the
-strategy. The hazard is deliberately not uniform: it is multiplied by quintile
-of trailing 12-month return, worst quintile 3x and best 0.4x, because companies
-die after their price falls and a random simulation would understate the bias
-badly. Across trials this gives a distribution of Sharpe under realistic
-censoring. The gap between the survivor-only Sharpe and the simulated median is
-the estimated bias; if the survivor-only number sits outside the simulated
-range, the headline is mostly artefact.
+* Breakouts over 50 days or less reverse strongly. The −8 Sharpe at N=5 is mostly bid-ask
+  bounce: the breakout close is often an ask-side print. This is reversal, but closing prices
+  overstate it, so it is not a free strategy to run in the opposite direction.
+* Trading one day **later** is better at every horizon (see the lag-1 vs lag-2 lines). This
+  is an execution finding: do not buy on the breakout close. Wait a day, or work a limit order.
+* Performance is broadly flat from N=150 to N=400, so N=250 is not a knife-edge choice.
+* Exit channel ([results/03_exit_grid_IS.csv](results/03_exit_grid_IS.csv)): an exit at half
+  the entry window (M = N/2) beat M = N/4 and M = N on IS.
 
-*Universe size.* Large-cap ASX delistings are overwhelmingly takeovers, which
-resolve at a premium already in the price, so the missing terminal return is
-near zero. Small-cap delistings are collapses, where it is near -100%.
-Delisting risk, borrow availability and spread therefore all worsen together as
-the universe widens, and `run_universe_size_comparison` runs every signal at 300
-names and at 100. **An edge that appears only at 300 names is the one to
-distrust.**
+### 2. New information / activity: volume confirmation does not help
+| Entries kept | IS Sharpe | OOS Sharpe | OOS alpha (t) |
+|---|---|---|---|
+| All | **1.51** | **1.50** | 9.2% (4.1) |
+| High-volume only (>1.5× avg) | 1.46 | 1.49 | 9.7% (4.1) |
+| Low-volume only | 1.40 | 1.34 | 8.8% (3.8) |
 
-`survivorship.apply_delisting_returns` remains for the handful of genuinely
-recovered dead names, booking an explicit terminal return and treating a >20%
-run-up into the exit as a takeover.
+High-volume breakouts beat low-volume ones, which is the direction the brief predicts. They
+do not beat taking every breakout, however, so the filter is **not** used in the final
+strategy. Under the earlier daily-reset backtest the filter looked mildly helpful; that
+advantage disappeared once holdings were allowed to drift.
 
-The bias does not run the same way for both strategy families. Momentum is
-short the falling names, which are the ones that delist, so censoring their
-final move makes momentum look *worse* than it was - survivor-only momentum
-results are a **lower** bound. Reversal is long them, so survivor-only reversal
-results are an **upper** bound. Quoting a single number for either, without the
-simulation range beside it, is not a result.
+### 3. Weighting: vol targeting
+Scaling the book to a 10% annualised vol target leaves Sharpe roughly the same. The target
+uses trailing 63-day realised vol, known at *t*, capped at 3× leverage. Returns rise roughly
+in proportion to the extra risk, so its use is risk control, not added edge.
 
-## Costs
+### 4. Execution / costs ([results/06_costs.csv](results/06_costs.csv))
+Turnover is about 3% of gross a day, because the 250-day channel trades rarely.
 
-The brief assumes 20 bps all-in for crypto market orders. ASX equities are
-cheaper on commission and more expensive on spread, and the spread is a strong
-function of size. `config.CostModel` charges 8 bps commission plus slippage
-that scales from 7 bps in the most liquid decile to 35 bps in the least, and
-the backtest applies it per side on drift-adjusted turnover.
+| Cost per trade | OOS Sharpe (next-day) | OOS alpha (t) |
+|---|---|---|
+| 0 bps | 0.93 | 6.8% (2.7) |
+| 7 bps (limit) | 0.87 | 6.3% (2.5) |
+| 20 bps (market) | 0.76 | 5.4% (2.2) |
+| 50 bps (stress) | 0.51 | 3.2% (1.3) |
 
-`metrics.break_even_cost_bps` reports the round-trip cost that would take the
-gross book to zero. For a five-day reversal signal this is the number that
-decides whether the strategy is real, and it is the first thing to check before
-being pleased about a Sharpe.
+### 5. Where the money comes from ([results/07_yearly.csv](results/07_yearly.csv))
+The implementable L/S book is positive in 15 of 20 full years (2006–2025). The losing years
+are 2008 (−7%), 2009 (−6%), 2016 (−5%), 2018 (−5%) and 2023 (−2%).
+2009 is the textbook **momentum crash**: the short leg lost 28% as beaten-down stocks
+rebounded, which the long leg partly offset. The long leg drives most returns in trending
+bull years. The short leg pays in bear years (2008, 2011, 2014, 2022), so the two legs
+diversify each other.
 
-## Results so far
+## Monte Carlo: strategy vs random buy-and-hold ([02_channel_breakout_research.ipynb](02_channel_breakout_research.ipynb), section 12)
 
-Sample: 1,635 ASX tickers, 2010-01 to 2026-08, universe rebuilt monthly by
-trailing turnover. Note that the liquidity and price floors bind before 300
-names do, so the "ASX 300" universe is really a median of **281** eligible
-names; asking for 500 returns the same 281.
+**Setup.** Each simulation picks K stocks at random from the ASX 500 on the start date,
+buys them equal weight (paying 20 bps once), and holds them to the end with no rebalancing.
+There are 1,000 simulations for each K: K=30, a typical concentrated investor, and K=187,
+the breakout strategy's average number of longs. Two windows are run, 2006–2026 and
+2017–2026. Like the strategy, random picks are drawn only from stocks still listed in 2026,
+so both carry the same survivorship bias.
 
-**Momentum works and is tradable.** Risk-adjusted 12-1 momentum, rebalanced
-monthly with five-day signal smoothing, market orders:
+![MC distributions](results/mc_distributions.png)
+![MC equity fan](results/mc_equity_fan.png)
 
-| | value |
-|---|---|
-| net return | 4.8% p.a. |
-| volatility | 6.8% p.a. |
-| Sharpe | 0.70 |
-| max drawdown | -14.8% |
-| beta to ASX 300 | -0.07 |
-| alpha | 3.9% p.a., t = 1.96 |
-| turnover | 5.4x p.a. |
-| break-even cost | 122 bps round trip |
+| OOS 2017–26 | CAGR | Sharpe | Max DD | Alpha vs ASX200 |
+|---|---|---|---|---|
+| Random B&H K=187, median (5th–95th pct) | 8.9% (6.8–11.0) | 0.58 (0.47–0.68) | −43% (−46 to −41) | 5.0% |
+| Long-only breakout | **18.9%** (100th pct) | **0.98** (100th) | −44% (33rd) | 14.1% (100th) |
+| L/S breakout, implementable | 6.1% (1st) | **0.76** (100th) | **−11.5%** (100th) | 6.7% (94th) |
+| L/S breakout, 10% vol target | 7.7% (15th) | **0.75** (100th) | −17.3% (100th) | 8.5% (100th) |
 
-The break-even number is the one that matters: at 122 bps against a cost model
-charging roughly 25, the result does not depend on the cost assumptions. The
-alpha t-statistic of 1.96 is a different story - it is significant by the
-thinnest possible margin over sixteen years, and should be quoted that way.
+Percentiles show where each strategy falls within the 1,000 random portfolios.
+Full-sample and K=30 results are in [results/10_mc_buyhold.csv](results/10_mc_buyhold.csv).
 
-**Rebalancing frequency was worth more than any signal change.** The same
-signal traded daily returns -1.3% net; traded monthly it returns +4.8%. Gross
-return barely moves (5.8% to 6.5%) while turnover falls from 23.6x to 5.4x.
-Before tuning a signal, check what the book is paying to chase it.
+* **Long-only breakout** beats all 1,000 random portfolios of the same size on return,
+  Sharpe and alpha, in both windows. It does not reduce crash risk: its OOS drawdown sits
+  mid-pack. It is a better stock picker, not a safer one.
+* **L/S breakout** does not out-earn buy-and-hold in raw return; it sits at the 1st–30th
+  percentile on CAGR. It runs at about 8% vol against 17% for buy-and-hold, however, so it
+  beats every random portfolio on Sharpe and drawdown. Its −11.5% OOS drawdown compares with
+  −41% to −46% for buy-and-hold.
+* **Control.** The same random picks reset to equal weight every day show a median CAGR of
+  31% and a Sharpe of 2.0 over 2006–2026. Random selection has no skill, so that figure is
+  the size of the daily-reset artifact, and it is why the backtests use drifting holdings.
 
-**Reversal does not survive costs.** Five-day reversal has a genuinely
-predictive signal - information coefficient 0.026 at one day, t = 12, decaying
-to zero by 21 days, and a top-minus-bottom quintile spread of 25% annualised
-gross. It still loses money at every frequency tested. Break-even is 8 to 10
-bps against a cost model charging roughly 25, and slowing the book down destroys
-the gross faster than it saves cost, because a five-day signal traded monthly is
-stale by the time it trades. Under limit-order execution the best variant makes
-1.5% a year at a Sharpe of 0.20, and that figure assumes every passive order
-fills, which is exactly the assumption a liquidity-providing strategy is least
-entitled to make. **Verdict: no tradable reversal edge on the ASX at daily
-frequency.** Neither the low-turnover tilt nor factor-neutralisation rescues it;
-all three reversal variants are correlated above 0.89 and fail together.
+## Statistical significance ([notebook 02](02_channel_breakout_research.ipynb), section 13)
 
-**Survivorship, momentum.** Survivor-only Sharpe 0.38 against a simulated median
-of 0.67, 5th-95th percentile 0.51 to 0.79, at a 5% annual hazard with terminal
-returns varying by liquidity decile (both at the weekly configuration). Injecting
-realistic deaths *helps* momentum, which is the direction theory predicts: the
-book is short the names that die, and the survivor-only sample censors its best
-trades. The reported momentum result is therefore a **lower** bound. Note the
-hazard used is aggressive - it kills about 1,054 of 1,635 names over the sample
-and shrinks the median book from 281 names to 190 - so treat the simulated
-figures as a stress, not a forecast.
+| Test (p-value; < 0.05 = significant) | Long-only | L/S implementable |
+|---|---|---|
+| Monte Carlo: Sharpe beats random buy-and-hold (OOS) | 0.001 | 0.001 |
+| Timing permutation: shuffled signal timing does as well (full) | 0.015 | 0.005 |
+| Paired block bootstrap: ΔSharpe vs random buy-and-hold (OOS) | 0.001 | 0.68 |
+| Paired block bootstrap: Δreturn vs random buy-and-hold (OOS) | 0.001 | 0.54 |
+| OOS Sharpe > 0 (probabilistic Sharpe ratio) | 0.001 | 0.009 |
 
-**The momentum edge lives in the smaller names, and this is the real
-vulnerability.** Monthly rebalance, five-day smoothing, market orders:
+* **Long-only** breakouts are significantly better than random buy-and-hold under every test.
+* **L/S:** breakout timing is significant and its alpha is significant. Its Sharpe *advantage* over buy-and-hold, however, is not significant once time-sampling noise is included (bootstrap); with 9–20 years of data, two Sharpe ratios are hard to tell apart.
+* **Deflated Sharpe** (correcting for about 35 in-sample trials): the in-sample result is borderline (0.96 counting plausible trials; it fails if the dead short-horizon trials are counted). The once-only out-of-sample test is the real evidence.
 
-| universe | names | net return | Sharpe | 21-day IC | IC t-stat |
-|---|---|---|---|---|---|
-| top 500 | 281 | 5.3% | 0.81 | 0.046 | 13.4 |
-| top 300 | 281 | 4.8% | 0.70 | 0.044 | 12.4 |
-| top 200 | 200 | 4.2% | 0.61 | 0.038 | 10.1 |
-| top 100 | 100 | 1.8% | 0.27 | 0.025 | 5.6 |
-| top 50 | 50 | 1.3% | 0.20 | 0.017 | 3.5 |
+## Removing beta ([notebook 02](02_channel_breakout_research.ipynb), section 14)
 
-The decay is monotone and, importantly, it is in the **information coefficient**,
-not in the costs - break-even stays between 58 and 130 bps at every size. So
-this is not a cost artefact: ASX momentum is genuinely weaker among large caps,
-which matches the equity momentum literature. It is still the finding that
-should temper enthusiasm, because the names carrying the edge are the ones that
-are hardest to borrow, widest to trade and most likely to delist. The honest
-summary is that the strategy is real at the ASX 200-300 level and marginal at
-the ASX 100 level.
+| OOS 2017–26 | Sharpe | Max DD | Alpha (t) | Beta vs ASX200 |
+|---|---|---|---|---|
+| Long-only, unhedged | 0.98 | −44% | 10.2% (5.4) | 0.93 |
+| **Long-only, hedged with ASX 200 (rolling beta)** | **1.03** | **−19%** | 10.3% (3.2) | −0.02 |
+| L/S implementable (single-stock shorts) | 0.76 | −12% | 5.4% (2.2) | −0.08 |
 
-## Research agenda
+* **Portfolio-level hedge (the WSQ regression approach): worthwhile.** Shorting index futures against the long book gives a market-neutral strategy without shorting small caps. It had the best out-of-sample Sharpe of the neutral books. It does not protect against a small-cap crash: its 2008 drawdown was still −43%.
+* **Signal-level (residual breakouts): not worthwhile here.** Breakouts on beta-adjusted prices were worse in- and out-of-sample for the L/S books, and lost more in 2009.
 
-The baseline run covers the four signals below. The brief's remaining threads
-are listed after them, with the function that supports each.
+## Robustness checks
 
-Baseline, in `scripts/03_run_baseline.py`:
+* **Size control** ([results/09_size_control.csv](results/09_size_control.csv)): the
+  implementable book is long small caps and short large caps, so part of its return could
+  be a size tilt. With a second factor (EW ASX 500 − EW top 200) in the regression, alpha
+  stays at **9.7% (t 3.6) IS and 6.1% (t 2.6) OOS**.
+* **Multiple testing:** about 80 configurations were tried on IS. The chosen one was then
+  confirmed OOS, and its neighbours (N=150–400) perform similarly. That makes a pure
+  data-mining explanation unlikely.
 
-| Signal | Idea |
-|---|---|
-| `mom_12_1` | risk-adjusted 12-month momentum, skipping the last month |
-| `rev_5d` | five-day cross-sectional reversal |
-| `rev_5d_quiet` | reversal tilted towards low-turnover, uninformed flow |
-| `rev_resid_5d` | reversal on factor-neutralised returns |
+## Caveats (read before trusting the numbers)
 
-Not yet run, and the natural next steps:
+1. **Survivorship bias.** The ticker list is today's listings, so stocks that delisted before
+   2026 are missing. This is the reason the pre-2017 universe holds 390–490 names rather than
+   500. Missing failures would mainly have paid the *short* leg, which understates it.
+   Missing takeover targets would mainly have paid the *long* leg. Measuring alpha against
+   the equal-weight universe, which carries the same bias, removes the common component.
+   A clean test needs a delisted-inclusive database (e.g. Norgate, Refinitiv).
+2. **Shorting constraints.** ASX short selling is limited to approved, liquid securities,
+   and borrow costs are not modelled. The "implementable" version limits shorts to the top
+   200 for this reason. The all-500 short book is a research construct, and the gap between
+   the two (OOS Sharpe 1.50 vs 0.76) shows how much of the edge sits in hard-to-short names.
+3. **Capacity.** The median held name trades A$0.1–0.8m a day before 2019 and A$1.5–5.6m
+   since. This strategy suits small capital. 20 bps is optimistic for the smallest names;
+   at 50 bps the OOS alpha is no longer significant (t 1.3).
+4. **Weighting.** There are no per-name, sector or liquidity caps, and each side gets 50% of
+   capital even when it holds few names.
+5. **Yahoo data quality.** Several adjustment errors were found and filtered (see Data). More
+   may remain undetected.
 
-- **Horizon sweep.** `backtest.information_coefficient` across lookbacks from
-  1 to 252 days, to locate the crossover where reversal becomes momentum on the
-  ASX. The two points measured so far put it somewhere between 5 and 63 days.
-- **Why momentum is weak in large caps.** The size decay above is the most
-  interesting open question in the results. Is it index-arbitrage flow, analyst
-  coverage, or simply that the ASX 100 is twelve stocks and a lot of noise?
-- **Reporting season.** Condition momentum on `financial_year_flags`
-  `reporting_season`; the new-information logic predicts momentum is stronger
-  in February and August.
-- **Tax-loss effect.** Test whether the May-June losers bounce in July, using
-  `tax_loss_window` and `tax_loss_reversal`.
-- **Macro regimes.** Split reversal performance by the terciles of
-  `signals.market_state` realised volatility, dispersion and pairwise
-  correlation, which is the brief's macro section directly.
-- **Theme momentum.** `signals.factor_momentum` on the statistical factors, to
-  test whether ASX themes trend even when individual names do not.
+## Next steps
 
-## Known limitations
+* Rerun on survivorship-free data with delisting returns.
+* Add a momentum-crash guard, for example scaling down the short leg after sharp market
+  rebounds (Daniel & Moskowitz).
+* Add per-name caps and liquidity-scaled weights.
+* Run a matched-random-entry null for the L/S book. This would shift each stock's signal
+  in time, keeping its trade count and holding periods, and is a tighter test than
+  buy-and-hold.
 
-- Yahoo's ASX history has occasional unadjusted split bars. `clean.py` discards
-  single-day moves beyond 80%, which removes most but not all of them.
-- The point-in-time universe is liquidity-ranked, not index membership. It
-  correlates highly with the real ASX 300 but is not identical, so results are
-  not directly comparable to published ASX 300 factor studies.
-- **The sample is survivor-only.** See above. Every number this repository
-  produces is a bound, not an estimate, until the data source changes.
-- No borrow cost or short availability constraint. Small ASX names are often
-  hard to borrow, so the short leg of any book weighted towards them is
-  optimistic. The `--compare-sizes 300,100` run shows how much of the result
-  depends on names that could actually be shorted.
-- Daily closes only. Anything the brief says about intraday execution or
-  front-running scheduled institutional flow needs a minute-bar feed.
+## Crash-only shorts ([03_crash_regime_shorts.ipynb](03_crash_regime_shorts.ipynb))
+
+Long-only breakouts with a short leg (index hedge or breakdown-stock shorts) switched on only when
+a market-crash signal fires (ASX 200 below its 200-day average, 10%/20% drawdown, or a volatility
+spike). The rule is chosen on 2006–16 in-sample Calmar; COVID and 2022 are out-of-sample.
+
+| OOS 2017–26 | Sharpe | Max DD | Calmar |
+|---|---|---|---|
+| Long-only | 0.98 | −44% | 0.44 |
+| Crash-only stock shorts (chosen: 200-day signal) | 0.79 | −33% | 0.42 |
+| Always index-hedged | 1.04 | −19% | 0.76 |
+
+* Crash-only shorting cut the crash losses themselves (COVID −13% vs −44%), even out-of-sample.
+* The signal was too slow to switch off, so the shorts were caught in the 2009 and 2020 rebounds,
+  and the 200-day rule whipsawed in 2022–23. Net, it was no better than long-only on Calmar.
+* The always-on ASX 200 futures hedge was the best risk-adjusted option out-of-sample.
+
+## Out-of-market test: US equities ([us_sp1500/](us_sp1500/))
+
+The ASX rule (N=250, M=125, next-day execution, 20 bps) was applied **unchanged** to an
+S&P 1500-style US universe: the top 1,500 by traded value from current S&P 500/400/600 members
+plus removed members that still have data.
+
+| Market-neutral L/S book | Sharpe IS 2006–16 | Sharpe OOS 2017–26 | Alpha OOS (t) |
+|---|---|---|---|
+| ASX 500 | 1.51 | 1.50 | 9.2% (4.1) |
+| US S&P 1500-style | −0.57 | −0.01 | 0.9% (0.4) |
+
+* **The edge does not carry over.** US long-horizon breakouts earn nothing market-neutral, the
+  long-only book just tracks the market, and the short leg lost money in most years of the US
+  bull market.
+* **The market is the reason, not the rule.** Classic 12-1 decile momentum on the same US data
+  had a Sharpe of −0.2 in 2006–16 and +0.3 in 2017–26, against +0.6 and +1.1 on the ASX.
+  US momentum was weak over this period; Australian momentum was strong.
+* **What does carry over:** short horizons reverse in both markets.
+
+## Out-of-market test: Nasdaq ([nasdaq/](nasdaq/))
+
+The same unchanged rule on the 1,000 most-traded Nasdaq-listed common stocks each month, built
+like the ASX universe (all current listings ranked by traded value):
+
+| Market-neutral L/S book | Sharpe IS 2006–16 | Sharpe OOS 2017–26 | Alpha OOS (t) |
+|---|---|---|---|
+| ASX 500 | 1.51 | 1.50 | 9.2% (4.1) |
+| Nasdaq top 1,000 | −0.06 | 0.32 | 3.1% (1.2) |
+| US S&P 1500-style | −0.57 | −0.01 | 0.9% (0.4) |
+
+* **Nasdaq sits between the two, much closer to the S&P 1500.** The post-2016 improvement
+  matches a US-wide momentum revival: classic 12-1 momentum on Nasdaq had a Sharpe of −0.02
+  in 2006–16 and 0.66 in 2017–26.
+* **Benchmark choice matters in a mega-cap era.** Long-only breakouts beat the equal-weight
+  universe but trail the cap-weighted Nasdaq Composite, and a Nasdaq-100 hedge lost money
+  because it shorted the market leaders.
+* **The ASX remains the outlier:** only there is the breakout edge strong and significant.
+
+## Companion study: intraday Bollinger bands ([intraday_bollinger/](intraday_bollinger/))
+
+A separate pipeline tests Bollinger-band mean reversion and breakout on one-minute bars for the
+same ASX 500 universe, using the last 30 days of Yahoo data (20 trading days, the most Yahoo keeps).
+
+* `01_intraday_data.ipynb` downloads the bars in 7-day chunks into an append-only store (re-run
+  every few weeks to build history), converts them to Sydney time, tags the closing auction and removes bad ticks.
+* `02_bollinger_research.ipynb` holds the signals, a trade-level backtest with next-bar fills, and
+  ASX tick-size-aware costs.
+
+**Result (20 trading days, exploratory):** one-minute prices revert, so mean reversion beats
+breakout before costs in every setup. No setup survives realistic market-order costs: about −54
+bps per trade over 12 in-sample days and −53 bps over 8 out-of-sample days. The gross edge is concentrated in low-priced
+stocks where one tick is 0.5–2% of the price, which makes it mostly bid-ask spread.
+
+## Reproduce
+
+Run the notebooks in order:
+
+1. `01_data_and_universe.ipynb`: downloads ~2,050 tickers and benchmarks (~10 min the first
+   time, cached in `data/`), cleans returns, builds the point-in-time universe and writes
+   `data/clean.pkl`.
+2. `02_channel_breakout_research.ipynb`: signal, backtest engine, all research sections and
+   the Monte Carlo. Writes tables `01`–`10` and the charts to `results/` (~2.5 min).
+
+The original script versions are kept in `archive_py/` for reference. They produce the same
+results but are no longer maintained.

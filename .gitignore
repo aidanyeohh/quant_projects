@@ -11,3 +11,8 @@ director_trading/eightk_dates_cache.csv
 
 # Other branches' working dirs
 hidformer_stock_price_forecasting/
+
+# Momentum study: cached market data in every sub-study (hundreds of MB to ~1 GB each)
+momentum_reversal/**/data/
+# Word lock files
+~$*
