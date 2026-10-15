@@ -288,21 +288,6 @@ like the ASX universe (all current listings ranked by traded value):
   because it shorted the market leaders.
 * **The ASX remains the outlier:** only there is the breakout edge strong and significant.
 
-## Companion study: intraday Bollinger bands ([intraday_bollinger/](intraday_bollinger/))
-
-A separate pipeline tests Bollinger-band mean reversion and breakout on one-minute bars for the
-same ASX 500 universe, using the last 30 days of Yahoo data (20 trading days, the most Yahoo keeps).
-
-* `01_intraday_data.ipynb` downloads the bars in 7-day chunks into an append-only store (re-run
-  every few weeks to build history), converts them to Sydney time, tags the closing auction and removes bad ticks.
-* `02_bollinger_research.ipynb` holds the signals, a trade-level backtest with next-bar fills, and
-  ASX tick-size-aware costs.
-
-**Result (20 trading days, exploratory):** one-minute prices revert, so mean reversion beats
-breakout before costs in every setup. No setup survives realistic market-order costs: about −54
-bps per trade over 12 in-sample days and −53 bps over 8 out-of-sample days. The gross edge is concentrated in low-priced
-stocks where one tick is 0.5–2% of the price, which makes it mostly bid-ask spread.
-
 ## Reproduce
 
 Run the notebooks in order:
