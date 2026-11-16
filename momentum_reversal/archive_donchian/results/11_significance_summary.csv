@@ -1,0 +1,6 @@
+,Long-only breakout,L/S implementable
+MC: Sharpe > random B&H (OOS),0.000999000999000999,0.000999000999000999
+Permutation: timing matters (full),0.004975124378109453,0.004975124378109453
+Bootstrap: ΔSharpe vs random B&H (OOS),0.001,0.668
+Bootstrap: Δreturn vs random B&H (OOS),0.0005,0.575
+OOS Sharpe > 0 (1 - PSR),0.0018106929092447377,0.010563784204829285
